@@ -1,34 +1,49 @@
 # Industrial AI Copilot Backend
 
-A Node.js backend server built with **Fastify**, **TypeScript**, **Mongoose** (MongoDB), and **LiveKit Server SDK** for real-time video/audio and vision AI copilot capabilities in industrial environments.
+A horizontally scalable Node.js backend built with **Fastify**, **Socket.IO** (`@socket.io/redis-adapter`), **Redis**, **BullMQ**, and **Mongoose** (MongoDB) for low-latency AI vision processing in industrial environments.
 
-## 🚀 Key Features
+---
 
-- **Fastify Web Framework**: High-performance HTTP server registered with `@fastify/cors` and `@fastify/env` schema validation.
+## 🚀 Key Architecture & Features
+
+- **Stateless Fastify Gateway**: High-performance HTTP & WebSocket server registered with `@fastify/cors`, `@fastify/env`, and `@socket.io/redis-adapter` for horizontal multi-instance scaling.
+- **Decoupled BullMQ Vision Queue (`ai-vision-queue`)**: When clients emit binary video frames (`process_frame`), the gateway pushes jobs to BullMQ immediately without blocking the Node.js event loop.
+- **Independent Vision Worker Cluster**: BullMQ workers pull from `ai-vision-queue`, run Gemini 1.5 Flash multimodal vision analysis, and use `@socket.io/redis-emitter` to broadcast the structured result directly to the originating `socket.id`.
 - **MongoDB & Mongoose Integration**:
   - **`WorkOrder` Schema**: Tracks worker assignments, completion statuses, priority levels, and step breakdown.
-  - **`Telemetry` Schema**: MongoDB **Time Series** collection for logging AI confidence scores (0.0–1.0) and latency metrics (ms).
+  - **`Telemetry` Schema**: MongoDB Time Series collection for logging AI confidence scores (0.0–1.0) and latency metrics (ms).
   - **`KnowledgeChunk` Schema**: Stores textual documentation, asset IDs, and 1536-dimensional embeddings prepared for **MongoDB Atlas Vector Search**.
-- **LiveKit RTC Integration**: Endpoint `GET /api/rtc/token` generating signed participant tokens using `livekit-server-sdk`.
-- **Vision AI Service Placeholder**: `ai.service.ts` structured for LangChain and vision LLMs (Gemini / OpenAI) to process base64 image frames.
-- **Modular Domain Architecture**: Organized into clean feature modules (`work-order`, `telemetry`, `knowledge`, `rtc`, `ai-chat`).
+- **Modular Domain Architecture**: Organized into clean feature modules (`work-order`, `telemetry`, `knowledge`, `ai-chat`).
 
 ---
 
 ## 📁 Project Structure
 
 ```
-copilot-server/
+zenith-server/
 ├── package.json
 ├── tsconfig.json
 ├── .env.example
 ├── README.md
 └── src/
-    ├── server.ts                    # Server bootstrap & entry point
+    ├── server.ts                    # Gateway process entrypoint (HTTP + Socket.IO)
+    ├── worker.ts                    # Standalone BullMQ Worker process entrypoint
     ├── app.ts                       # Fastify application setup & plugin configuration
     ├── config/
     │   ├── env.ts                   # Environment variable validation schema
+    │   ├── redis.ts                 # Shared Redis connection factory (Adapter, BullMQ, Emitter)
     │   └── database.ts              # Mongoose MongoDB connection handler
+    ├── queues/
+    │   ├── queue.config.ts          # Queue names & default job retention policies
+    │   └── vision.queue.ts          # BullMQ 'ai-vision-queue' producer & enqueue helper
+    ├── workers/
+    │   └── vision.worker.ts         # BullMQ Worker processor + Gemini mock + Redis Emitter
+    ├── sockets/
+    │   ├── socket.config.ts         # Socket.IO options, event constants & payload interfaces
+    │   └── socket.gateway.ts        # Socket.IO Gateway with Redis Adapter & 'process_frame' handler
+    ├── types/
+    │   ├── fastify.d.ts             # Fastify instance interface extensions
+    │   └── vision.types.ts          # Strictly typed schemas for frames, jobs, and results
     ├── modules/
     │   ├── work-order/
     │   │   ├── work-order.model.ts  # WorkOrder Mongoose Schema
@@ -42,23 +57,44 @@ copilot-server/
     │   │   ├── knowledge.model.ts   # Vector Search KnowledgeChunk Schema (1536-dim)
     │   │   ├── knowledge.service.ts # Knowledge CRUD & vector search
     │   │   └── knowledge.routes.ts  # HTTP endpoints under /api/knowledge
-    │   ├── rtc/
-    │   │   ├── rtc.service.ts       # LiveKit token generator (livekit-server-sdk)
-    │   │   └── rtc.routes.ts        # GET /api/rtc/token endpoint
     │   └── ai-chat/
     │       ├── ai.service.ts        # Multimodal Vision AI processing service
     │       └── ai-chat.routes.ts    # HTTP endpoints under /api/ai-chat
-    └── types/
-        └── fastify.d.ts             # Fastify instance interface extensions
+    ├── plugins/
+    │   └── requestLogger.ts         # Industrial colored console logger
+    └── utils/
+        ├── AppError.ts              # Application error classes
+        ├── errorHandler.ts          # Global error handler
+        └── response.util.ts         # Standard response formatters
 ```
 
 ---
 
-## 🛠️ API Reference
+## ⚡ WebSocket Events Reference
 
-### RTC LiveKit Endpoint
-- `GET /api/rtc/token?room_name=factory-floor-1&participant_name=worker-john`
-  - Returns signed LiveKit JWT token and server WebSocket connection URL.
+### Client -> Gateway
+- `process_frame`: Emits raw binary `ArrayBuffer` or `{ frame: ArrayBuffer, workOrderId?: string, stepNumber?: number }`.
+- `join_stream`: Join a work order room (`{ workOrderId: string, role: 'publisher' | 'subscriber', workerName?: string }`).
+- `video_frame`: Real-time relay frame for supervisor dashboard.
+- `leave_stream`: Leave stream room.
+
+### Worker / Gateway -> Client
+- `frame_queued`: Immediate acknowledgment emitted by Gateway with `{ jobId: string, status: 'QUEUED', queue: 'ai-vision-queue' }`.
+- `frame_processed`: Dispatched by background BullMQ worker via `@socket.io/redis-emitter` directly to `socket.id`:
+  ```json
+  {
+    "status": "COMPLETED",
+    "feedback_hinglish": "Done, agla step karo.",
+    "jobId": "123",
+    "confidence": 0.96,
+    "processingTimeMs": 412,
+    "timestamp": "2026-08-29T07:45:00.000Z"
+  }
+  ```
+
+---
+
+## 🛠️ API Reference
 
 ### Work Orders (`/api/work-orders`)
 - `GET /api/work-orders`: List all work orders (optional query filters: `status`, `assignedWorkerId`, `assetId`).
@@ -96,14 +132,24 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-### 3. Build & Run
-```bash
-# Development (with hot reloading via tsx)
-npm run dev
+### 3. Run Gateway & Worker
 
-# Build TypeScript to JavaScript
+```bash
+# Terminal 1: Start WebSocket Gateway (with hot-reload)
+npm run dev:gateway
+
+# Terminal 2: Start BullMQ AI Vision Worker (with hot-reload)
+npm run dev:worker
+```
+
+### 4. Production Build & Start
+```bash
+# Build TypeScript
 npm run build
 
-# Start Production Server
-npm start
+# Start Gateway
+npm run start:gateway
+
+# Start Worker
+npm run start:worker
 ```

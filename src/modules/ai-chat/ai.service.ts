@@ -5,6 +5,7 @@ export interface FrameAnalysisRequest {
   prompt?: string;
   workOrderId?: string;
   stepId?: string;
+  stepNumber?: number;
   assetId?: string;
   workerId?: string;
   mimeType?: string;
@@ -15,6 +16,9 @@ export interface FrameAnalysisResponse {
   confidenceScore: number;
   detectedObjects: string[];
   isStepComplete: boolean;
+  stepVerified?: boolean;
+  feedback?: string;
+  hazardsDetected?: string[];
   suggestedAction?: string;
   latencyMs: number;
   timestamp: string;

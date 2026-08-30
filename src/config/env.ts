@@ -2,7 +2,7 @@ import { FastifyEnvOptions } from '@fastify/env';
 
 const schema = {
   type: 'object',
-  required: ['MONGODB_URI', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET'],
+  required: ['MONGODB_URI'],
   properties: {
     PORT: {
       type: 'number',
@@ -18,19 +18,23 @@ const schema = {
     },
     MONGODB_URI: {
       type: 'string',
-      default: 'mongodb://localhost:27017/industrial_copilot',
+      default: 'mongodb://127.0.0.1:27017/industrial_copilot',
     },
-    LIVEKIT_API_KEY: {
+    REDIS_HOST: {
       type: 'string',
-      default: 'devkey',
+      default: '127.0.0.1',
     },
-    LIVEKIT_API_SECRET: {
-      type: 'string',
-      default: 'secret',
+    REDIS_PORT: {
+      type: 'number',
+      default: 6379,
     },
-    LIVEKIT_URL: {
+    REDIS_PASSWORD: {
       type: 'string',
-      default: 'wss://your-livekit-server-url.livekit.cloud',
+      default: '',
+    },
+    REDIS_URL: {
+      type: 'string',
+      default: '',
     },
     OPENAI_API_KEY: {
       type: 'string',
