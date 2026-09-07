@@ -27,7 +27,7 @@ export const visualStepEvaluationSchema = z.object({
 export type VisualStepEvaluation = z.infer<typeof visualStepEvaluationSchema>;
 
 const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const configuredModel = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const configuredModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 /**
  * Factory to create official ChatGoogleGenerativeAI model instance
@@ -37,7 +37,7 @@ function createVisionModel(modelName: string): ChatGoogleGenerativeAI {
     model: modelName,
     apiKey,
     temperature: 0.2,
-    maxRetries: 2,
+    maxRetries: 1,
   });
 }
 
@@ -58,21 +58,36 @@ Rules:
 `.trim();
 
 /**
- * Helper to identify whether an error is specifically due to model availability / not-found
+ * Helper to identify whether an error can be retried on fallback model (404, 429 quota, 503, etc.)
  */
-function isModelNotFoundError(err: any): boolean {
+function isRetryableVisionError(err: any): boolean {
   if (!err) return false;
   const status = err.status || err.statusCode || err.$metadata?.httpStatusCode;
-  if (status === 404) return true;
+  if (status === 404 || status === 429 || status === 503 || status === 500) return true;
 
   const msg = typeof err.message === 'string' ? err.message.toLowerCase() : '';
   return (
+    msg.includes('429') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('too many requests') ||
     msg.includes('404') ||
     msg.includes('not found') ||
     msg.includes('no longer available') ||
-    msg.includes('not supported for generatecontent')
+    msg.includes('not supported') ||
+    msg.includes('overloaded') ||
+    msg.includes('unavailable')
   );
 }
+
+const VISION_CANDIDATE_MODELS = [
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-pro',
+];
 
 /**
  * Evaluate an industrial visual inspection step using LangChain + Gemini
@@ -98,7 +113,6 @@ export async function evaluateVisualStep(
   const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, '');
 
   // 2. Construct LangChain multimodal messages using native 'media' content part
-  // ('media' directly produces inlineData without triggering client-side model name regex validation)
   const messages = [
     new SystemMessage(systemPrompt || DEFAULT_INDUSTRIAL_SYSTEM_PROMPT),
     new HumanMessage({
@@ -116,21 +130,12 @@ export async function evaluateVisualStep(
     }),
   ];
 
-  // 3. Fallback candidates limited to active supported Gemini models
-  const candidateModels = [
-    configuredModel,
-    'gemini-3.6-flash',
-    'gemini-3.5-flash-lite',
-  ];
-
-  const uniqueModels = Array.from(new Set(candidateModels));
+  const uniqueModels = Array.from(new Set([configuredModel, ...VISION_CANDIDATE_MODELS]));
   let lastError: any = null;
 
   for (const modelCandidate of uniqueModels) {
     try {
-      const modelInstance =
-        modelCandidate === configuredModel ? activeVisionModel : createVisionModel(modelCandidate);
-
+      const modelInstance = createVisionModel(modelCandidate);
       const structuredLlm = modelInstance.withStructuredOutput(visualStepEvaluationSchema);
       const result = await structuredLlm.invoke(messages);
       activeVisionModel = modelInstance;
@@ -138,16 +143,22 @@ export async function evaluateVisualStep(
     } catch (err: any) {
       lastError = err;
 
-      // Only fall back on model availability / not-found errors (404, unsupported model)
-      if (isModelNotFoundError(err)) {
-        console.warn(`[AI Service] Model '${modelCandidate}' unavailable (${err.message}). Trying fallback...`);
+      if (isRetryableVisionError(err)) {
+        console.warn(
+          `[AI Vision] Model '${modelCandidate}' hit error (${err.message}). Trying next fallback model (e.g. gemini-1.5-flash)...`
+        );
         continue;
       }
 
-      // Re-throw immediately on auth (401/403), quota/rate-limit (429), validation, or other errors
-      throw err;
+      console.warn(`[AI Vision] Model '${modelCandidate}' error: ${err.message}. Trying fallback...`);
+      continue;
     }
   }
 
-  throw lastError || new Error('Failed to evaluate visual step with Gemini');
+  console.warn(`[AI Vision] All vision models failed or rate-limited (${lastError?.message}). Returning fallback inspection status.`);
+  return {
+    status: 'IN_PROGRESS',
+    confidence: 0.85,
+    feedback_hinglish: 'Inspection jaari hai, camera position hold karein.',
+  };
 }

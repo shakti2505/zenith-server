@@ -6,6 +6,39 @@ import { colors } from '../../plugins/requestLogger.js';
 
 export class ProcedureController {
   /**
+   * POST /api/procedures/generate-magic
+   * Natural Language Magic SOP Generation from task description
+   */
+  static async generateMagicProcedure(request: FastifyRequest, reply: FastifyReply) {
+    const body = (request.body || {}) as {
+      taskDescription?: string;
+      prompt?: string;
+    };
+
+    const taskDescription = body.taskDescription || body.prompt;
+
+    if (!taskDescription || typeof taskDescription !== 'string' || !taskDescription.trim()) {
+      throw AppError.badRequest('Please provide a valid task description (e.g. "Change ceiling fan capacitor").');
+    }
+
+    console.log(
+      `  ${colors.brightCyan}✨ [MAGIC SOP GENERATION]${colors.reset} Generating procedure for: "${taskDescription.trim()}"...`
+    );
+
+    const procedure = await ProcedureService.generateMagicProcedure(taskDescription.trim());
+
+    console.log(
+      `  ${colors.brightGreen}✅ [MAGIC SOP GENERATED]${colors.reset} Procedure '${procedure.title}' created (ID: ${procedure._id}, Steps: ${procedure.steps.length})`
+    );
+
+    return reply.status(201).send({
+      success: true,
+      procedure_id: procedure._id,
+      procedure,
+    });
+  }
+
+  /**
    * POST /api/procedures/upload-custom
    * Upload image or PDF manual and generate structured SOP
    */

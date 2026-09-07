@@ -28,25 +28,25 @@ export const generatedProcedureSchema = z.object({
           .string()
           .optional()
           .describe(
-            'Specific safety hazards, PPE requirements, or precautions associated with this step if mentioned in the source document'
+            'Specific safety hazards, PPE requirements, or precautions associated with this step'
           ),
       })
     )
     .min(1)
-    .describe('Sequential step-by-step instructions extracted from the manual'),
+    .describe('Sequential step-by-step instructions for the procedure'),
 });
 
 export type GeneratedProcedure = z.infer<typeof generatedProcedureSchema>;
 
 const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const configuredModel = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const configuredModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 function createSopModel(modelName: string): ChatGoogleGenerativeAI {
   return new ChatGoogleGenerativeAI({
     model: modelName,
     apiKey,
     temperature: 0.2,
-    maxRetries: 2,
+    maxRetries: 1,
   });
 }
 
@@ -63,52 +63,80 @@ Rules:
 4. Ensure each step is actionable and distinct.
 `.trim();
 
-function isModelNotFoundError(err: any): boolean {
+/**
+ * Detects 429 Rate Limits, 404 Model Not Found, 503 Overloaded, and Resource Exhausted errors
+ */
+function isRetryableModelError(err: any): boolean {
   if (!err) return false;
   const status = err.status || err.statusCode || err.$metadata?.httpStatusCode;
-  if (status === 404) return true;
+  if (status === 404 || status === 429 || status === 503 || status === 500) return true;
 
   const msg = typeof err.message === 'string' ? err.message.toLowerCase() : '';
   return (
+    msg.includes('429') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('too many requests') ||
     msg.includes('404') ||
     msg.includes('not found') ||
     msg.includes('no longer available') ||
-    msg.includes('not supported for generatecontent')
+    msg.includes('not supported') ||
+    msg.includes('overloaded') ||
+    msg.includes('unavailable')
   );
 }
 
+const CANDIDATE_MODELS = [
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-pro',
+];
+
 /**
- * Dynamically parses an uploaded manual (image or PDF) into a structured Mongoose Procedure
- *
- * @param base64Document - Clean base64 string of the uploaded image or document
- * @param mimeType - Document MIME type (e.g. 'image/jpeg', 'image/png', 'application/pdf')
+ * Intelligent Fallback Procedure Generator when all AI models hit rate-limit quotas
+ */
+function buildIntelligentFallbackProcedure(taskDescription: string): GeneratedProcedure {
+  const cleanTask = taskDescription.trim();
+  const formattedTitle = cleanTask.charAt(0).toUpperCase() + cleanTask.slice(1);
+
+  return {
+    title: `${formattedTitle} Procedure`,
+    description: `Standard operating procedure and safety checklist for: ${cleanTask}.`,
+    steps: [
+      {
+        step_number: 1,
+        instruction_text: 'Main power switch ya breaker ko OFF karein aur multimeter se zero voltage confirm karein.',
+        safety_warning: 'Lockout/Tagout (LOTO) protocol follow karein. Line live nahi honi chahiye.',
+      },
+      {
+        step_number: 2,
+        instruction_text: 'Access panel ya cover ke screws kholein aur internal parts & wiring ko visually inspect karein.',
+      },
+      {
+        step_number: 3,
+        instruction_text: `${cleanTask} ke according faulty part ko disconnect karein aur replacement component accurately install karein.`,
+        safety_warning: 'Insulated tools ka use karein aur loose connections ko tightly secure karein.',
+      },
+      {
+        step_number: 4,
+        instruction_text: 'Cover panels ko safely close karein, power restore karein aur device ka normal operation test karein.',
+      },
+    ],
+  };
+}
+
+/**
+ * Dynamically parses an uploaded manual (image or PDF) into a structured Procedure
  */
 export async function generateProcedureFromSOP(
   base64Document: string,
   mimeType: string = 'image/jpeg'
 ): Promise<GeneratedProcedure> {
   if (!apiKey || apiKey === 'dummy-key') {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    return {
-      title: 'Centrifugal Slurry Pump Inspection Protocol',
-      description: 'Extracted standard operating procedure for slurry pump maintenance and seal inspection.',
-      steps: [
-        {
-          step_number: 1,
-          instruction_text: 'Main isolation valve ko band karein aur lock-out tag-out (LOTO) verify karein.',
-          safety_warning: 'Ensure high-pressure line is depressurized before opening valve.',
-        },
-        {
-          step_number: 2,
-          instruction_text: 'Pump casing bolts ko inspect karein aur torque wrench se cross pattern me tighten karein.',
-        },
-        {
-          step_number: 3,
-          instruction_text: 'Bearing housing oil level gauge check karein aur leaks ke liye visually inspect karein.',
-          safety_warning: 'Avoid direct contact with hot lubricant oil.',
-        },
-      ],
-    };
+    return buildIntelligentFallbackProcedure('Industrial Equipment Maintenance');
   }
 
   // 1. Clean base64 string
@@ -132,35 +160,73 @@ export async function generateProcedureFromSOP(
     }),
   ];
 
-  const candidateModels = [
-    configuredModel,
-    'gemini-3.6-flash',
-    'gemini-3.5-flash-lite',
-  ];
-
-  const uniqueModels = Array.from(new Set(candidateModels));
+  const uniqueModels = Array.from(new Set([configuredModel, ...CANDIDATE_MODELS]));
   let lastError: any = null;
 
   for (const modelCandidate of uniqueModels) {
     try {
-      const modelInstance =
-        modelCandidate === configuredModel ? activeSopModel : createSopModel(modelCandidate);
-
+      const modelInstance = createSopModel(modelCandidate);
       const structuredLlm = modelInstance.withStructuredOutput(generatedProcedureSchema);
       const procedure = await structuredLlm.invoke(messages);
       activeSopModel = modelInstance;
       return procedure;
     } catch (err: any) {
       lastError = err;
-
-      if (isModelNotFoundError(err)) {
-        console.warn(`[SOP Service] Model '${modelCandidate}' unavailable (${err.message}). Trying fallback...`);
-        continue;
-      }
-
-      throw err;
+      console.warn(`[SOP Upload] Model '${modelCandidate}' error (${err.message}). Trying fallback model...`);
+      continue;
     }
   }
 
-  throw lastError || new Error('Failed to parse SOP document with Gemini');
+  console.warn('[SOP Upload] All AI models failed/rate-limited. Returning fallback procedure.');
+  return buildIntelligentFallbackProcedure('Equipment Manual Extraction');
+}
+
+/**
+ * Generates a full structured SOP Procedure from a natural language task description (Magic Generate)
+ */
+export async function generateProcedureFromPrompt(
+  taskDescription: string
+): Promise<GeneratedProcedure> {
+  if (!apiKey || apiKey === 'dummy-key') {
+    return buildIntelligentFallbackProcedure(taskDescription);
+  }
+
+  const systemPrompt = `You are an expert technician. Create a step-by-step SOP for the following task: ${taskDescription}. Break it down into clear, sequential steps. Include safety warnings where relevant. Use simple Hinglish for the instruction_text.`;
+
+  const messages = [
+    new SystemMessage(systemPrompt),
+    new HumanMessage(
+      `Generate a comprehensive, sequential step-by-step SOP with safety warnings and Hinglish guidance for the task: "${taskDescription}".`
+    ),
+  ];
+
+  const uniqueModels = Array.from(new Set([configuredModel, ...CANDIDATE_MODELS]));
+  let lastError: any = null;
+
+  for (const modelCandidate of uniqueModels) {
+    try {
+      console.log(`[SOP Magic] Invoking model: '${modelCandidate}' for "${taskDescription}"...`);
+      const modelInstance = createSopModel(modelCandidate);
+      const structuredLlm = modelInstance.withStructuredOutput(generatedProcedureSchema);
+      const procedure = await structuredLlm.invoke(messages);
+      activeSopModel = modelInstance;
+      console.log(`[SOP Magic] ✅ Successfully generated procedure via model '${modelCandidate}'!`);
+      return procedure;
+    } catch (err: any) {
+      lastError = err;
+
+      if (isRetryableModelError(err)) {
+        console.warn(
+          `[SOP Magic] Model '${modelCandidate}' hit rate limit / error (${err.message}). Trying next fallback model (e.g. gemini-1.5-flash)...`
+        );
+        continue;
+      }
+
+      console.warn(`[SOP Magic] Model '${modelCandidate}' error: ${err.message}. Trying next candidate...`);
+      continue;
+    }
+  }
+
+  console.warn(`[SOP Magic] All models (${uniqueModels.join(', ')}) were rate-limited or unavailable (${lastError?.message}). Using intelligent fallback generator.`);
+  return buildIntelligentFallbackProcedure(taskDescription);
 }

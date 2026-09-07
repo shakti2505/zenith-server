@@ -1,9 +1,66 @@
 import { FastifyPluginAsync } from 'fastify';
-import { generateProcedureFromSOP } from '../services/sop.service.js';
+import {
+  generateProcedureFromSOP,
+  generateProcedureFromPrompt,
+} from '../services/sop.service.js';
 import { Procedure } from '../models/procedure.model.js';
 import { colors } from '../plugins/requestLogger.js';
 
 export const procedureRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * POST /api/procedures/generate-magic
+   * Natural Language Magic SOP Generation from task description
+   */
+  fastify.post('/generate-magic', async (request, reply) => {
+    try {
+      const body = (request.body || {}) as {
+        taskDescription?: string;
+        prompt?: string;
+      };
+
+      const taskDescription = body.taskDescription || body.prompt;
+
+      if (!taskDescription || typeof taskDescription !== 'string' || !taskDescription.trim()) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Please provide a valid task description (e.g. "Change ceiling fan capacitor").',
+        });
+      }
+
+      console.log(
+        `  ${colors.brightCyan}✨ [MAGIC SOP GENERATION]${colors.reset} Generating procedure for: "${taskDescription.trim()}"...`
+      );
+
+      // Extract and parse structured procedure via LangChain Gemini
+      const parsedProcedure = await generateProcedureFromPrompt(taskDescription.trim());
+
+      // Save directly into MongoDB Procedure collection with is_custom: true
+      const newProcedure = await Procedure.create({
+        title: parsedProcedure.title,
+        description: parsedProcedure.description,
+        steps: parsedProcedure.steps,
+        is_custom: true,
+      });
+
+      console.log(
+        `  ${colors.brightGreen}✅ [MAGIC SOP GENERATED]${colors.reset} Procedure '${newProcedure.title}' created (ID: ${newProcedure._id}, Steps: ${newProcedure.steps.length})`
+      );
+
+      return reply.status(201).send({
+        success: true,
+        procedure_id: newProcedure._id,
+        procedure: newProcedure,
+      });
+    } catch (err: any) {
+      console.error(`  ${colors.brightRed}❌ [MAGIC SOP ERROR]${colors.reset}:`, err.message);
+      return reply.status(500).send({
+        success: false,
+        error: 'Failed to generate procedure from task prompt.',
+        details: err.message,
+      });
+    }
+  });
+
   /**
    * POST /api/procedures/upload-custom
    * Upload an image (JPEG, PNG) or PDF manual and dynamically generate a structured SOP Procedure
@@ -38,7 +95,7 @@ export const procedureRoutes: FastifyPluginAsync = async (fastify) => {
       const fileBuffer = await file.toBuffer();
       const base64Document = fileBuffer.toString('base64');
 
-      // 3. Extract and parse structured procedure via LangChain Gemini 1.5 Flash
+      // 3. Extract and parse structured procedure via LangChain Gemini
       const parsedProcedure = await generateProcedureFromSOP(base64Document, mimeType);
 
       // 4. Save directly into MongoDB Procedure collection with is_custom: true

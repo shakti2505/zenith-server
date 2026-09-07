@@ -1,7 +1,27 @@
 import { Procedure, IProcedure } from './procedure.model.js';
-import { generateProcedureFromSOP, GeneratedProcedure } from '../../services/sop.service.js';
+import {
+  generateProcedureFromSOP,
+  generateProcedureFromPrompt,
+  GeneratedProcedure,
+} from '../../services/sop.service.js';
 
 export class ProcedureService {
+  /**
+   * Natural language AI Magic SOP generation using LangChain + Gemini
+   */
+  static async generateMagicProcedure(taskDescription: string): Promise<IProcedure> {
+    const parsed: GeneratedProcedure = await generateProcedureFromPrompt(taskDescription);
+
+    const procedure = await Procedure.create({
+      title: parsed.title,
+      description: parsed.description,
+      steps: parsed.steps,
+      is_custom: true,
+    });
+
+    return procedure.toObject();
+  }
+
   /**
    * Upload and dynamically generate a structured SOP procedure using LangChain + Gemini
    */
